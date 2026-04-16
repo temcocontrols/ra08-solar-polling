@@ -45,7 +45,7 @@ Recommended build environment:
 ```bash
 cd /mnt/d/work/Ai-Thinker-LoRaWAN-Ra-08
 source build/envsetup.sh
-make -j8 projects/ASR6601CB-EVAL/examples/lora/lora_myself_net
+make -j32 projects/ASR6601CB-EVAL/examples/lora/lora_myself_net
 ```
 
 Select SHT40 at compile time:

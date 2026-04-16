@@ -2,6 +2,7 @@
 #include "tremo_rcc.h"
 #include "tremo_gpio.h"
 #include "tremo_i2c.h"
+#include "tremo_delay.h"
 #include "tremo_lpuart.h"
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +12,17 @@
 
 // Single shot high repeatability no clock stretching: 0x2400
 static const uint8_t SHT3X_CMD_SINGLE_HIGH[2] = {0x24, 0x00};
+
+#define SHT3X_I2C_WAIT_TIMEOUT 200000U
+
+static bool sht3x_wait_flag(i2c_t *i2c, i2c_flag_t flag)
+{
+    uint32_t timeout = SHT3X_I2C_WAIT_TIMEOUT;
+    while ((i2c_get_flag_status(i2c, flag) != SET) && (timeout > 0U)) {
+        timeout--;
+    }
+    return (timeout > 0U);
+}
 
 // CRC8 calculation for SHT3x (polynomial 0x31)
 static uint8_t sht3x_crc8(const uint8_t *data, uint8_t len)
@@ -51,13 +63,22 @@ bool sht3x_read(float *temperature_c, float *relative_humidity)
     // send single shot command
     i2c_master_send_start(I2C0, SHT3X_ADDR << 1, I2C_WRITE);
     i2c_clear_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY);
-    while (i2c_get_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY) != SET) ;
+    if (!sht3x_wait_flag(I2C0, I2C_FLAG_TRANS_EMPTY)) {
+        i2c_master_send_stop(I2C0);
+        return false;
+    }
     i2c_send_data(I2C0, SHT3X_CMD_SINGLE_HIGH[0]);
     i2c_clear_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY);
-    while (i2c_get_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY) != SET) ;
+    if (!sht3x_wait_flag(I2C0, I2C_FLAG_TRANS_EMPTY)) {
+        i2c_master_send_stop(I2C0);
+        return false;
+    }
     i2c_send_data(I2C0, SHT3X_CMD_SINGLE_HIGH[1]);
     i2c_clear_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY);
-    while (i2c_get_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY) != SET) ;
+    if (!sht3x_wait_flag(I2C0, I2C_FLAG_TRANS_EMPTY)) {
+        i2c_master_send_stop(I2C0);
+        return false;
+    }
     i2c_master_send_stop(I2C0);
 
     // conversion time ~15 ms for high repeatability
@@ -70,7 +91,10 @@ bool sht3x_read(float *temperature_c, float *relative_humidity)
         // For last byte send NAK
         if (i == 5) i2c_set_receive_mode(I2C0, I2C_NAK);
         else i2c_set_receive_mode(I2C0, I2C_ACK);
-        while (i2c_get_flag_status(I2C0, I2C_FLAG_RECV_FULL) != SET) ;
+        if (!sht3x_wait_flag(I2C0, I2C_FLAG_RECV_FULL)) {
+            i2c_master_send_stop(I2C0);
+            return false;
+        }
         buf[i] = i2c_receive_data(I2C0);
         i2c_clear_flag_status(I2C0, I2C_FLAG_RECV_FULL);
     }

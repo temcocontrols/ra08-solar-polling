@@ -15,6 +15,8 @@
 #include "sht_sensor.h"
 #include "lora_protocol.h"
 
+#define FW_DEBUG_VERSION "join-debug-v20260416-1"
+
 /* checksum helper moved to lora_protocol.h (lora_simple_checksum) */
 
 /* Blink state (node only) */
@@ -23,6 +25,8 @@ static int blink_ms_remaining = 0;
 static int blink_toggle_elapsed = 0;
 static int blink_toggle_interval = 250; /* ms */
 static int blink_led_state = 0;
+static TimerTime_t node_last_report_at = 0;
+static bool node_report_due_immediately = false;
 #endif
 
 uint8_t SLAVE1_ADDR = 0x00; // 本地地址默认为0
@@ -157,6 +161,62 @@ void OnRxTimeout(void);
  * \brief Function executed on Radio Rx Error event
  */
 void OnRxError(void);
+
+static void get_unique_id_bytes(uint8_t *uid);
+
+#ifndef CONFIG_GATEWAY
+static bool node_handle_rx_packet(void)
+{
+    /* Strict legacy set-address packet: A0 <addr> 00 00 00 00 A1 */
+    bool is_legacy_set_addr =
+        (BufferSize == 7) &&
+        (Buffer[0] == 0xA0) &&
+        (Buffer[2] == 0x00) &&
+        (Buffer[3] == 0x00) &&
+        (Buffer[4] == 0x00) &&
+        (Buffer[5] == 0x00) &&
+        (Buffer[6] == 0xA1);
+
+    if (BufferSize >= 8 && Buffer[0] == 0xA0 && Buffer[1] == 0x11 && Buffer[BufferSize - 1] == 0xA1)
+    {
+        uint8_t uid[4];
+        get_unique_id_bytes(uid);
+        printf("[JOIN] got ASSIGN packet, checking UID...\r\n");
+        if (memcmp(uid, &Buffer[2], 4) == 0)
+        {
+            uint8_t new_addr = Buffer[6];
+            SLAVE1_ADDR = new_addr;
+            printf("[JOIN] assigned address in RAM: %d\r\n", SLAVE1_ADDR);
+            printf("[JOIN] skip flash store during join (avoid reset risk)\r\n");
+            {
+                uint8_t ack[4] = {0xA0, 0x12, SLAVE1_ADDR, 0xA1};
+                printf("[JOIN] send ASSIGN ACK for addr %d\r\n", SLAVE1_ADDR);
+                Radio.Send(ack, sizeof(ack));
+            }
+            printf("[JOIN] assigned address %d\r\n", SLAVE1_ADDR);
+            return true;
+        }
+        printf("[JOIN] ASSIGN packet UID mismatch\r\n");
+        return false;
+    }
+
+    if (is_legacy_set_addr)
+    {
+        uint8_t new_addr = Buffer[1];
+        SLAVE1_ADDR = new_addr;
+        printf("[JOIN] legacy assigned address in RAM: %d\r\n", SLAVE1_ADDR);
+        printf("[JOIN] skip flash store for legacy assign (avoid reset risk)\r\n");
+        {
+            uint8_t ack[4] = {0xA0, 0x1E, SLAVE1_ADDR, 0xA1};
+            printf("[JOIN] send legacy ACK for addr %d\r\n", SLAVE1_ADDR);
+            Radio.Send(ack, sizeof(ack));
+        }
+        return true;
+    }
+
+    return false;
+}
+#endif
 
 /**
  * 功能：发送数�?�?
@@ -347,43 +407,51 @@ static void get_unique_id_bytes(uint8_t *uid)
     uid[3] = (uint8_t)((ChipId[0] >> 24) & 0xFF);
 }
 
-// Node: send JOIN request if no address assigned. Returns when assigned or timeout.
-static void node_send_join_request(void)
+#ifndef CONFIG_GATEWAY
+static void node_send_sensor_report(const char *reason)
 {
-    uint8_t uid[4];
-    get_unique_id_bytes(uid);
-    uint8_t pkt[7];
-    pkt[0] = 0xA0;
-    pkt[1] = 0x10; // JOIN_REQ
-    memcpy(&pkt[2], uid, 4);
-    pkt[6] = 0xA1;
+    float t = 0.0f;
+    float rh = 0.0f;
+    printf("[NODE] %s begin sensor read\r\n", reason);
+    int ok = sht_sensor_read(&t, &rh);
 
-    // seed rand with chip id to get some jitter
-    srand((unsigned int)(ChipId[0] ^ ChipId[1]));
-
-    const int max_attempts = 6;
-    for (int attempt = 0; attempt < max_attempts; ++attempt) {
-        if (SLAVE1_ADDR != 0) break; // already assigned
-        printf("[JOIN] sending JOIN_REQ attempt %d\r\n", attempt + 1);
-        Radio.Send(pkt, sizeof(pkt));
-        // wait for response window (check periodically)
-        int wait_ms = 2000 + (rand() % 2000);
-        int elapsed = 0;
-        while (elapsed < wait_ms) {
-            if (SLAVE1_ADDR != 0) break;
-            delay_ms(100);
-            elapsed += 100;
-        }
-        if (SLAVE1_ADDR != 0) break;
-        // random backoff before next attempt
-        delay_ms(500 + (rand() % 1500));
-    }
-    if (SLAVE1_ADDR != 0) {
-        printf("[JOIN] assigned address %d\r\n", SLAVE1_ADDR);
+    if (!ok) {
+        printf("[NODE] %s sensor read failed, sending zeros\r\n", reason);
+        t = 0.0f;
+        rh = 0.0f;
     } else {
-        printf("[JOIN] no address assigned after attempts\r\n");
+        printf("[NODE] %s sensor read: T=%.2fC RH=%.2f%%\r\n", reason, t, rh);
+    }
+
+    int16_t t100 = (int16_t)(t * 100.0f);
+    uint16_t rh100 = (uint16_t)(rh * 100.0f);
+    uint8_t uid[4];
+    uint8_t pkt[11];
+
+    get_unique_id_bytes(uid);
+    pkt[0] = 0xA0;
+    pkt[1] = 0x21;
+    pkt[2] = uid[0];
+    pkt[3] = uid[1];
+    pkt[4] = uid[2];
+    pkt[5] = uid[3];
+    pkt[6] = (uint8_t)((t100 >> 8) & 0xFF);
+    pkt[7] = (uint8_t)(t100 & 0xFF);
+    pkt[8] = (uint8_t)((rh100 >> 8) & 0xFF);
+    pkt[9] = (uint8_t)(rh100 & 0xFF);
+    pkt[10] = 0xA1;
+
+    if (sendMsgFlag == 2) {
+        printf("[NODE] %s direct report send uid=%02X%02X%02X%02X t100=%d rh100=%u\r\n",
+               reason, uid[0], uid[1], uid[2], uid[3], t100, rh100);
+        sendMsgFlag = 1;
+        Radio.Send(pkt, sizeof(pkt));
+        node_last_report_at = TimerGetCurrentTime();
+    } else {
+        printf("[NODE] %s direct report deferred sendMsgFlag=%d state=%d\r\n", reason, sendMsgFlag, State);
     }
 }
+#endif
 
 int Ra08KitLoraTestStart(void)
 {
@@ -394,32 +462,11 @@ int Ra08KitLoraTestStart(void)
     DeviceBlock DeviceBlock_StructureArray[2];
     int i = 0;
 
-    printf("Ra-08-kit test Start! ");
+    printf("Ra-08-kit test Start! \r\n");
+    printf("[FW] %s\r\n", FW_DEBUG_VERSION);
 
     (void)system_get_chip_id(ChipId);
 
-    // Try to load stored node address from flash (for node builds)
-#ifndef CONFIG_GATEWAY
-    {
-        uint8_t stored = 0;
-        if (load_node_address(&stored)) {
-            SLAVE1_ADDR = stored;
-            printf("Loaded node address from flash: %d\r\n", SLAVE1_ADDR);
-        } else {
-            printf("No stored node address in flash, using default: %d\r\n", SLAVE1_ADDR);
-            // If no stored address, try to join and obtain one from gateway
-            node_send_join_request();
-        }
-    }
-#ifndef CONFIG_GATEWAY
-    /* initialize selected SHT sensor on node devices */
-    if (sht_sensor_init()) {
-        printf("SHT sensor init OK\r\n");
-    } else {
-        printf("SHT sensor init FAILED\r\n");
-    }
-#endif
-#endif
 #ifdef CONFIG_GATEWAY
     // initialize in-memory address manager
     init_address_manager();
@@ -501,46 +548,42 @@ int Ra08KitLoraTestStart(void)
 
     Radio.Rx(RX_TIMEOUT_VALUE);
 
+#ifndef CONFIG_GATEWAY
+    {
+        uint8_t stored = 0;
+        if (load_node_address(&stored)) {
+            SLAVE1_ADDR = stored;
+            printf("Loaded node address from flash: %d\r\n", SLAVE1_ADDR);
+        } else {
+            printf("No stored node address in flash, using default: %d\r\n", SLAVE1_ADDR);
+        }
+
+        if (sht_sensor_init()) {
+            printf("SHT sensor init OK\r\n");
+        } else {
+            printf("SHT sensor init FAILED\r\n");
+        }
+
+        node_report_due_immediately = true;
+        node_last_report_at = TimerGetCurrentTime();
+        State = LORA_IDLE;
+        Radio.Rx(RX_TIMEOUT_VALUE);
+        printf("[NODE] radio initialized, direct sensor reporting enabled\r\n");
+    }
+#else
+    printf("[GW] radio initialized, waiting for sensor reports\r\n");
+#endif
+
     while (1)
     {
 
 #ifdef CONFIG_GATEWAY
-        static bool flag = 0;
-        static uint8_t node_addr = 0x01;
-        static long count = 0;
-        if (0 == flag)
+        static long wait_log_count = 0;
+        wait_log_count++;
+        if (wait_log_count > 500000)
         {
-            // printf("GATEWAY ...\r\n");
-            Radio.Send(send_buff, sizeof(send_buff));
-            printf("GATEWAY send data:\r\n");
-            for (int i = 0; i < sizeof(send_buff); i++)
-            {
-                printf("%02X ", send_buff[i]);
-            }
-            printf("\r\n");
-            printf("flag: %d count: %d\r\n", flag, count);
-            flag = 1;
-        }
-        count++;
-        if (count > 1000000)
-        {
-            count = 0;
-            flag = 0;
-            printf("ADDR %d get ack timeout\r\n", node_addr);
-            node_addr++;
-            if (node_addr > Addr_Num)
-            {
-                if (send_buff[3] == 1)
-                {
-                    send_buff[3] = 2;
-                }
-                else
-                {
-                    send_buff[3] = 1;
-                }
-                node_addr = 0x01;
-            }
-            send_buff[2] = node_addr;
+            wait_log_count = 0;
+            printf("[GW] waiting sensor reports\r\n");
         }
 #endif
 
@@ -553,30 +596,19 @@ int Ra08KitLoraTestStart(void)
 #ifdef CONFIG_GATEWAY
             if (Buffer[0] == 0xFF)
             {
-                node_addr = Buffer[1] + 1;
-                if (node_addr > Addr_Num)
-                {
-                    node_addr = 0x01;
-                    if (send_buff[3] == 1)
-                    {
-                        send_buff[3] = 2;
-                    }
-                    else
-                    {
-                        send_buff[3] = 1;
-                    }
-                }
-                send_buff[2] = node_addr;
-                printf("Get data from: %d ,set next call node: %d, polling nodes num: %d \r\n", Buffer[1], node_addr, Addr_Num);
+                printf("[GW] legacy data from addr=%d\r\n", Buffer[1]);
                 printf("data: %s\r\n", (char *)(Buffer + 2));
-                count = 0;
-                flag = 0;
             }
-            // Detect JOIN_REQ: A0 0x10 UID[4] A1 (Buffer contains full packet)
-            else if (BufferSize >= 6 && Buffer[0] == 0xA0 && Buffer[1] == 0x10 && Buffer[BufferSize - 1] == 0xA1)
+            else if (BufferSize == 11 && Buffer[0] == 0xA0 && Buffer[1] == 0x21 && Buffer[10] == 0xA1)
             {
-                // handle join (UID at Buffer+2)
-                handle_join_req(&Buffer[2]);
+                uint8_t uid0 = Buffer[2];
+                uint8_t uid1 = Buffer[3];
+                uint8_t uid2 = Buffer[4];
+                uint8_t uid3 = Buffer[5];
+                int16_t t100 = (int16_t)(((uint16_t)Buffer[6] << 8) | Buffer[7]);
+                uint16_t rh100 = (uint16_t)(((uint16_t)Buffer[8] << 8) | Buffer[9]);
+                printf("[GW] sensor report uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%%\r\n",
+                       uid0, uid1, uid2, uid3, t100 / 100.0f, rh100 / 100.0f);
             }
             /* Handle FIND ACK from nodes: A0 OPCODE_FIND_ACK <addr> <status> <cs> A1 */
             else if (BufferSize >= 6 && Buffer[0] == 0xA0 && Buffer[1] == OPCODE_FIND_ACK && Buffer[BufferSize - 1] == 0xA1)
@@ -601,23 +633,9 @@ int Ra08KitLoraTestStart(void)
             {
 
                 // Handle ASSIGN_ADDR from gateway: A0 0x11 UID[4] ADDR A1
-                if (BufferSize >= 8 && Buffer[0] == 0xA0 && Buffer[1] == 0x11 && Buffer[BufferSize - 1] == 0xA1)
+                if (node_handle_rx_packet())
                 {
-                    uint8_t uid[4];
-                    get_unique_id_bytes(uid);
-                    if (memcmp(uid, &Buffer[2], 4) == 0) {
-                        uint8_t new_addr = Buffer[6];
-                        SLAVE1_ADDR = new_addr;
-                        if (store_node_address(SLAVE1_ADDR)) {
-                            printf("Stored node address from ASSIGN packet: %d\r\n", SLAVE1_ADDR);
-                        } else {
-                            printf("Failed to store node address from ASSIGN packet\r\n");
-                        }
-                        // send simple ACK: A0 0x12 <addr> A1
-                        uint8_t ack[4] = {0xA0, 0x12, SLAVE1_ADDR, 0xA1};
-                        Radio.Send(ack, sizeof(ack));
-                        break;
-                    }
+                    break;
                 }
                 /* Handle FIND broadcast: A0 OPCODE_FIND <addr> <duration> <cs> A1 */
                 else if (BufferSize >= 6 && Buffer[0] == 0xA0 && Buffer[1] == OPCODE_FIND && Buffer[BufferSize - 1] == 0xA1)
@@ -647,8 +665,14 @@ int Ra08KitLoraTestStart(void)
                     }
                     break;
                 }
-                // Fallback: legacy simple set-address packet A0 <addr> A1
-                else if (BufferSize >= 4 && Buffer[0] == 0xA0 && Buffer[BufferSize - 1] == 0xA1)
+                // Fallback: strict legacy set-address packet A0 <addr> 00 00 00 00 A1
+                else if ((BufferSize == 7) &&
+                         (Buffer[0] == 0xA0) &&
+                         (Buffer[2] == 0x00) &&
+                         (Buffer[3] == 0x00) &&
+                         (Buffer[4] == 0x00) &&
+                         (Buffer[5] == 0x00) &&
+                         (Buffer[6] == 0xA1))
                 {
                     uint8_t new_addr = Buffer[1];
                     SLAVE1_ADDR = new_addr;
@@ -821,46 +845,14 @@ int Ra08KitLoraTestStart(void)
         /* Periodic SHT3x read and send (node only). Uses a simple software timer
          * paced by a short delay to avoid busy-looping. Interval ~10s. */
 #ifndef CONFIG_GATEWAY
-        static uint32_t sht_elapsed_ms = 0;
-        const uint32_t sht_interval_ms = 10000; /* 10 seconds */
+        const TimerTime_t sht_interval_ms = 10000;
 
-        /* small delay to pace the main loop; allows counting time */
         delay_ms(50);
-        sht_elapsed_ms += 50;
-        if (sht_elapsed_ms >= sht_interval_ms) {
-            sht_elapsed_ms = 0;
-            float t = 0.0f, rh = 0.0f;
-            int ok = sht3x_read(&t, &rh);
-
-            /* If read failed, send zeros for temperature and humidity per request. */
-            if (!ok) {
-                printf("SHT3x read failed, sending zeros\r\n");
-                t = 0.0f;
-                rh = 0.0f;
-            } else {
-                printf("SHT3x read: T=%.2fC RH=%.2f%%, sending packet\r\n", t, rh);
-            }
-
-            /* pack temperature and humidity as int16/uint16 (centi-units) */
-            int16_t t100 = (int16_t)(t * 100.0f);
-            uint16_t rh100 = (uint16_t)(rh * 100.0f);
-            uint8_t pkt[9];
-            pkt[0] = 0xA0;      /* start */
-            pkt[1] = 0x20;      /* SHT3x report opcode */
-            pkt[2] = SLAVE1_ADDR;/* node address */
-            pkt[3] = (uint8_t)((t100 >> 8) & 0xFF);
-            pkt[4] = (uint8_t)(t100 & 0xFF);
-            pkt[5] = (uint8_t)((rh100 >> 8) & 0xFF);
-            pkt[6] = (uint8_t)(rh100 & 0xFF);
-            pkt[7] = 0x00;      /* reserved */
-            pkt[8] = 0xA1;      /* end */
-
-            if (sendMsgFlag == 2) {
-                sendMsgFlag = 1;
-                Radio.Send(pkt, sizeof(pkt));
-            } else {
-                printf("Lora busy, skip sending SHT3x report\r\n");
-            }
+        if (node_report_due_immediately) {
+            node_report_due_immediately = false;
+            node_send_sensor_report("startup");
+        } else if (TimerGetElapsedTime(node_last_report_at) >= sht_interval_ms) {
+            node_send_sensor_report("periodic");
         }
 
         /* Blink state update (50ms tick) - only toggle GPIO_PIN_4 now */
@@ -898,6 +890,7 @@ int Ra08KitLoraTestStart(void)
 void OnTxDone(void)
 {
     Radio.Sleep();
+    printf("[RADIO] OnTxDone\r\n");
     State = TX;
 }
 
@@ -922,29 +915,37 @@ unsigned char receivePackets(unsigned char *buffer)
 
 void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
 {
+    if (size == 0) {
+        printf("[RADIO] OnRxDone size=0 ignored\r\n");
+        return;
+    }
     Radio.Sleep();
     BufferSize = size;
     memset(Buffer, 0, BUFFER_SIZE);
     memcpy(Buffer, payload, BufferSize);
     RssiValue = rssi;
     SnrValue = snr;
+    printf("[RADIO] OnRxDone size=%d rssi=%d snr=%d\r\n", size, rssi, snr);
     State = RX;
 }
 
 void OnTxTimeout(void)
 {
     Radio.Sleep();
+    printf("[RADIO] OnTxTimeout\r\n");
     State = TX_TIMEOUT;
 }
 
 void OnRxTimeout(void)
 {
     Radio.Sleep();
+    printf("[RADIO] OnRxTimeout\r\n");
     State = RX_TIMEOUT;
 }
 
 void OnRxError(void)
 {
     Radio.Sleep();
+    printf("[RADIO] OnRxError\r\n");
     State = RX_ERROR;
 }

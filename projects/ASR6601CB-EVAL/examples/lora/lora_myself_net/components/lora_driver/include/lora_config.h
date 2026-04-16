@@ -16,13 +16,27 @@ extern "C"
 
 #include "tremo_gpio.h"
 
-#define CONFIG_GATEWAY (1)
+//#define CONFIG_GATEWAY (1)
 
 #define CONFIG_LORA_RFSW_CTRL_GPIOX GPIOD
 #define CONFIG_LORA_RFSW_CTRL_PIN GPIO_PIN_11
 
 #define CONFIG_LORA_RFSW_VDD_GPIOX GPIOA
 #define CONFIG_LORA_RFSW_VDD_PIN GPIO_PIN_10
+
+/* RA08 board pin mapping (project baseline) */
+#define CONFIG_RA08_I2C_GPIOX GPIOA
+#define CONFIG_RA08_I2C_SCL_PIN GPIO_PIN_14
+#define CONFIG_RA08_I2C_SDA_PIN GPIO_PIN_15
+
+/* STCC4 CO2 sensor enable */
+#define CONFIG_CO2_EN_GPIOX GPIOA
+#define CONFIG_CO2_EN_PIN GPIO_PIN_5
+
+/* SHT40 humidity sensor enable (HUM_EN) */
+/* HUM_EN is wired to SWDIO (PA13) */
+#define CONFIG_HUM_EN_GPIOX GPIOA
+#define CONFIG_HUM_EN_PIN GPIO_PIN_13
 
 #ifdef __cplusplus
 }

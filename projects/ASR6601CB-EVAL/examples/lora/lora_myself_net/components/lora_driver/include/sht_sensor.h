@@ -4,7 +4,7 @@
 #include <stdbool.h>
 
 #ifndef SHT_SENSOR_TYPE
-#define SHT_SENSOR_TYPE 3  /* 3 = SHT3X (默认), 40 = SHT40 */
+#define SHT_SENSOR_TYPE 40  /* 3 = SHT3X, 40 = SHT40 (current default) */
 #endif
 
 #ifdef __cplusplus
