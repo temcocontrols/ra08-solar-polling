@@ -13,6 +13,7 @@
 #include "address_manager.h"
 #endif
 #include "sht_sensor.h"
+#include "adc_monitor.h"
 #include "lora_protocol.h"
 
 #define FW_DEBUG_VERSION "join-debug-v20260416-1"
@@ -412,8 +413,14 @@ static void node_send_sensor_report(const char *reason)
 {
     float t = 0.0f;
     float rh = 0.0f;
+    float vcap = 0.0f;
     printf("[NODE] %s begin sensor read\r\n", reason);
     int ok = sht_sensor_read(&t, &rh);
+    vcap = adc_monitor_read_voltage();
+    if (vcap < 0.0f) {
+        printf("[NODE] %s ADC read timeout, sending Vcap=0\r\n", reason);
+        vcap = 0.0f;
+    }
 
     if (!ok) {
         printf("[NODE] %s sensor read failed, sending zeros\r\n", reason);
@@ -425,8 +432,9 @@ static void node_send_sensor_report(const char *reason)
 
     int16_t t100 = (int16_t)(t * 100.0f);
     uint16_t rh100 = (uint16_t)(rh * 100.0f);
+    uint16_t vcap_mv = (uint16_t)(vcap * 1000.0f);
     uint8_t uid[4];
-    uint8_t pkt[11];
+    uint8_t pkt[13];
 
     get_unique_id_bytes(uid);
     pkt[0] = 0xA0;
@@ -439,11 +447,13 @@ static void node_send_sensor_report(const char *reason)
     pkt[7] = (uint8_t)(t100 & 0xFF);
     pkt[8] = (uint8_t)((rh100 >> 8) & 0xFF);
     pkt[9] = (uint8_t)(rh100 & 0xFF);
-    pkt[10] = 0xA1;
+    pkt[10] = (uint8_t)((vcap_mv >> 8) & 0xFF);
+    pkt[11] = (uint8_t)(vcap_mv & 0xFF);
+    pkt[12] = 0xA1;
 
     if (sendMsgFlag == 2) {
-        printf("[NODE] %s direct report send uid=%02X%02X%02X%02X t100=%d rh100=%u\r\n",
-               reason, uid[0], uid[1], uid[2], uid[3], t100, rh100);
+        printf("[NODE] %s direct report send uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%% Vcap=%.3fV\r\n",
+               reason, uid[0], uid[1], uid[2], uid[3], t100 / 100.0f, rh100 / 100.0f, vcap_mv / 1000.0f);
         sendMsgFlag = 1;
         Radio.Send(pkt, sizeof(pkt));
         node_last_report_at = TimerGetCurrentTime();
@@ -564,6 +574,9 @@ int Ra08KitLoraTestStart(void)
             printf("SHT sensor init FAILED\r\n");
         }
 
+        adc_monitor_init();
+        printf("ADC monitor init OK (IO8/PA8)\r\n");
+
         node_report_due_immediately = true;
         node_last_report_at = TimerGetCurrentTime();
         State = LORA_IDLE;
@@ -599,6 +612,18 @@ int Ra08KitLoraTestStart(void)
                 printf("[GW] legacy data from addr=%d\r\n", Buffer[1]);
                 printf("data: %s\r\n", (char *)(Buffer + 2));
             }
+            else if (BufferSize == 13 && Buffer[0] == 0xA0 && Buffer[1] == 0x21 && Buffer[12] == 0xA1)
+            {
+                uint8_t uid0 = Buffer[2];
+                uint8_t uid1 = Buffer[3];
+                uint8_t uid2 = Buffer[4];
+                uint8_t uid3 = Buffer[5];
+                int16_t t100 = (int16_t)(((uint16_t)Buffer[6] << 8) | Buffer[7]);
+                uint16_t rh100 = (uint16_t)(((uint16_t)Buffer[8] << 8) | Buffer[9]);
+                uint16_t vcap_mv = (uint16_t)(((uint16_t)Buffer[10] << 8) | Buffer[11]);
+                printf("[GW] sensor report uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%% Vcap=%.3fV\r\n",
+                       uid0, uid1, uid2, uid3, t100 / 100.0f, rh100 / 100.0f, vcap_mv / 1000.0f);
+            }
             else if (BufferSize == 11 && Buffer[0] == 0xA0 && Buffer[1] == 0x21 && Buffer[10] == 0xA1)
             {
                 uint8_t uid0 = Buffer[2];
@@ -607,7 +632,7 @@ int Ra08KitLoraTestStart(void)
                 uint8_t uid3 = Buffer[5];
                 int16_t t100 = (int16_t)(((uint16_t)Buffer[6] << 8) | Buffer[7]);
                 uint16_t rh100 = (uint16_t)(((uint16_t)Buffer[8] << 8) | Buffer[9]);
-                printf("[GW] sensor report uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%%\r\n",
+                printf("[GW] sensor report(legacy) uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%%\r\n",
                        uid0, uid1, uid2, uid3, t100 / 100.0f, rh100 / 100.0f);
             }
             /* Handle FIND ACK from nodes: A0 OPCODE_FIND_ACK <addr> <status> <cs> A1 */

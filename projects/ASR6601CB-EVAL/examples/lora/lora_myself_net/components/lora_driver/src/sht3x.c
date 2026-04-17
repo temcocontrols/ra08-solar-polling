@@ -61,7 +61,7 @@ bool sht3x_read(float *temperature_c, float *relative_humidity)
     if (temperature_c == NULL || relative_humidity == NULL) return false;
 
     // send single shot command
-    i2c_master_send_start(I2C0, SHT3X_ADDR << 1, I2C_WRITE);
+    i2c_master_send_start(I2C0, SHT3X_ADDR, I2C_WRITE);
     i2c_clear_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY);
     if (!sht3x_wait_flag(I2C0, I2C_FLAG_TRANS_EMPTY)) {
         i2c_master_send_stop(I2C0);
@@ -85,7 +85,7 @@ bool sht3x_read(float *temperature_c, float *relative_humidity)
     delay_ms(20);
 
     // read 6 bytes
-    i2c_master_send_start(I2C0, SHT3X_ADDR << 1, I2C_READ);
+    i2c_master_send_start(I2C0, SHT3X_ADDR, I2C_READ);
     uint8_t buf[6];
     for (int i = 0; i < 6; ++i) {
         // For last byte send NAK
