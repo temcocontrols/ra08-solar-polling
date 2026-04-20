@@ -16,7 +16,7 @@ extern "C"
 
 #include "tremo_gpio.h"
 
-//#define CONFIG_GATEWAY (1)
+#define CONFIG_GATEWAY (1)
 
 #define CONFIG_LORA_RFSW_CTRL_GPIOX GPIOD
 #define CONFIG_LORA_RFSW_CTRL_PIN GPIO_PIN_11

@@ -9,8 +9,8 @@
 #define SHT40_ADDR 0x44
 #define SHT40_I2C_WAIT_TIMEOUT 200000U
 
-/* Single-shot, high repeatability */
-static const uint8_t SHT40_CMD_SINGLE_HIGH[2] = {0x2C, 0x06};
+/* SHT4x single-shot high-repeatability command */
+#define SHT40_CMD_MEASURE_HIGH 0xFD
 
 /* Alternate preferred HUM_EN level across calls. */
 static bool g_sht40_next_hum_en_high = true;
@@ -46,14 +46,7 @@ static bool sht40_read_once(float *temperature_c, float *rh_percent)
         i2c_master_send_stop(I2C0);
         return false;
     }
-    i2c_send_data(I2C0, SHT40_CMD_SINGLE_HIGH[0]);
-
-    i2c_clear_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY);
-    if (!sht40_wait_flag(I2C0, I2C_FLAG_TRANS_EMPTY)) {
-        i2c_master_send_stop(I2C0);
-        return false;
-    }
-    i2c_send_data(I2C0, SHT40_CMD_SINGLE_HIGH[1]);
+    i2c_send_data(I2C0, SHT40_CMD_MEASURE_HIGH);
 
     i2c_clear_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY);
     if (!sht40_wait_flag(I2C0, I2C_FLAG_TRANS_EMPTY)) {
@@ -62,9 +55,16 @@ static bool sht40_read_once(float *temperature_c, float *rh_percent)
     }
     i2c_master_send_stop(I2C0);
 
-    delay_ms(20);
+    /* SHT40 high-repeatability conversion time is typically < 10 ms. */
+    delay_ms(10);
 
     i2c_master_send_start(I2C0, SHT40_ADDR, I2C_READ);
+    i2c_clear_flag_status(I2C0, I2C_FLAG_TRANS_EMPTY);
+    if (!sht40_wait_flag(I2C0, I2C_FLAG_TRANS_EMPTY)) {
+        i2c_master_send_stop(I2C0);
+        return false;
+    }
+
     for (int i = 0; i < 6; ++i) {
         i2c_set_receive_mode(I2C0, (i == 5) ? I2C_NAK : I2C_ACK);
         if (!sht40_wait_flag(I2C0, I2C_FLAG_RECV_FULL)) {
