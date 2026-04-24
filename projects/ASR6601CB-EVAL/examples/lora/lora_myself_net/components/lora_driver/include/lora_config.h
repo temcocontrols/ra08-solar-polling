@@ -16,7 +16,7 @@ extern "C"
 
 #include "tremo_gpio.h"
 
-#define CONFIG_GATEWAY (1)
+//#define CONFIG_GATEWAY (1)
 
 #define CONFIG_LORA_RFSW_CTRL_GPIOX GPIOD
 #define CONFIG_LORA_RFSW_CTRL_PIN GPIO_PIN_11
@@ -32,6 +32,12 @@ extern "C"
 /* STCC4 CO2 sensor enable */
 #define CONFIG_CO2_EN_GPIOX GPIOA
 #define CONFIG_CO2_EN_PIN GPIO_PIN_5
+
+/* Supercap voltage monitor input (ADC) */
+#define CONFIG_VCAP_ADC_GPIOX GPIOA
+#define CONFIG_VCAP_ADC_PIN GPIO_PIN_8
+/* ADC sample channel number (1..15). Update after channel scan result. */
+#define CONFIG_VCAP_ADC_CHAN 2U
 
 /* SHT40 humidity sensor enable (HUM_EN) */
 /* HUM_EN is wired to SWDIO (PA13) */

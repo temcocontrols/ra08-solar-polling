@@ -12,7 +12,8 @@ extern "C" {
 void adc_monitor_init(void);
 
 /**
- * @brief  Read the supercapacitor voltage on IO8 (PA8, ADC channel 1).
+ * @brief  Read the supercapacitor voltage on configured ADC pin/channel
+ *         (see lora_config.h CONFIG_VCAP_ADC_*).
  *         Averages multiple samples and applies factory calibration.
  * @return Voltage in volts at the ADC pin.
  *         Returns -1.0f on timeout error.
