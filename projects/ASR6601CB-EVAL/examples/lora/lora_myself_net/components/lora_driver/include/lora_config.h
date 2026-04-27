@@ -33,6 +33,24 @@ extern "C"
 #define CONFIG_CO2_EN_GPIOX GPIOA
 #define CONFIG_CO2_EN_PIN GPIO_PIN_5
 
+/* BH1620FVC (analog current output) */
+/* IO11: light analog output sampling pin */
+#define CONFIG_BH1620_ADC_GPIOX GPIOA
+#define CONFIG_BH1620_ADC_PIN GPIO_PIN_11
+/* ADC channel for IO11, adjust after on-board validation if needed */
+#define CONFIG_BH1620_ADC_CHAN 3U
+
+/* LPRXD: BH1620 enable pin */
+#define CONFIG_BH1620_EN_GPIOX GPIOA
+#define CONFIG_BH1620_EN_PIN GPIO_PIN_12
+#define CONFIG_BH1620_EN_ACTIVE_HIGH 1
+#define CONFIG_BH1620_POWER_ON_DELAY_MS 10U
+
+/* Lux conversion for current-source output: lux = (V/R) / (uA_per_lux) */
+/* Set Rsense according to your actual external resistor and gain mode. */
+#define CONFIG_BH1620_RSENSE_OHM 10000.0f
+#define CONFIG_BH1620_UA_PER_LUX 0.50f
+
 /* Supercap voltage monitor input (ADC) */
 #define CONFIG_VCAP_ADC_GPIOX GPIOA
 #define CONFIG_VCAP_ADC_PIN GPIO_PIN_8

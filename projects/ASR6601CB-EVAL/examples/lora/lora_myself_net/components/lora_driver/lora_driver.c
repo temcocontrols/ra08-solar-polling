@@ -16,6 +16,7 @@
 #include "adc_monitor.h"
 #include "stcc4.h"
 #include "sgp30.h"
+#include "bh1620.h"
 #include "lora_protocol.h"
 
 #ifdef CONFIG_GATEWAY
@@ -435,6 +436,7 @@ static void node_send_sensor_report(const char *reason)
     float vcap = 0.0f;
     uint16_t co2_ppm = 0U;
     uint16_t tvoc_ppb = 0U;
+    uint16_t lux = 0U;
     printf("[NODE] %s begin sensor read\r\n", reason);
     int ok = sht_sensor_read(&t, &rh);
     vcap = adc_monitor_read_voltage();
@@ -445,6 +447,10 @@ static void node_send_sensor_report(const char *reason)
     if (!sgp30_read_tvoc(&tvoc_ppb)) {
         printf("[NODE] %s SGP30 read failed, sending TVOC=0\r\n", reason);
         tvoc_ppb = 0U;
+    }
+    if (!bh1620_read_lux(&lux)) {
+        printf("[NODE] %s BH1620 read failed, sending LUX=0\r\n", reason);
+        lux = 0U;
     }
     if (vcap < 0.0f) {
         printf("[NODE] %s ADC read timeout, sending Vcap=0\r\n", reason);
@@ -463,7 +469,7 @@ static void node_send_sensor_report(const char *reason)
     uint16_t rh100 = (uint16_t)(rh * 100.0f);
     uint16_t vcap_mv = (uint16_t)(vcap * 1000.0f);
     uint8_t uid[4];
-    uint8_t pkt[17];
+    uint8_t pkt[19];
 
     get_unique_id_bytes(uid);
     pkt[0] = 0xA0;
@@ -482,11 +488,13 @@ static void node_send_sensor_report(const char *reason)
     pkt[13] = (uint8_t)(co2_ppm & 0xFF);
     pkt[14] = (uint8_t)((tvoc_ppb >> 8) & 0xFF);
     pkt[15] = (uint8_t)(tvoc_ppb & 0xFF);
-    pkt[16] = 0xA1;
+        pkt[16] = (uint8_t)((lux >> 8) & 0xFF);
+        pkt[17] = (uint8_t)(lux & 0xFF);
+        pkt[18] = 0xA1;
 
-    printf("[NODE] %s direct report send uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%% Vcap=%.3fV CO2=%uppm TVOC=%uppb\r\n",
+        printf("[NODE] %s direct report send uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%% Vcap=%.3fV CO2=%uppm TVOC=%uppb LUX=%u\r\n",
            reason, uid[0], uid[1], uid[2], uid[3], t100 / 100.0f, rh100 / 100.0f,
-           vcap_mv / 1000.0f, (unsigned)co2_ppm, (unsigned)tvoc_ppb);
+            vcap_mv / 1000.0f, (unsigned)co2_ppm, (unsigned)tvoc_ppb, (unsigned)lux);
     sendMsgFlag = 1;
     Radio.Send(pkt, sizeof(pkt));
     node_last_report_at = TimerGetCurrentTime();
@@ -616,6 +624,12 @@ int Ra08KitLoraTestStart(void)
             printf("SGP30 sensor init FAILED\r\n");
         }
 
+        if (bh1620_init()) {
+            printf("BH1620 sensor init OK\r\n");
+        } else {
+            printf("BH1620 sensor init FAILED\r\n");
+        }
+
         adc_monitor_init();
         printf("ADC monitor init OK (IO8/PA8)\r\n");
 
@@ -654,6 +668,46 @@ int Ra08KitLoraTestStart(void)
                 printf("[GW] legacy data from addr=%d\r\n", Buffer[1]);
                 printf("data: %s\r\n", (char *)(Buffer + 2));
             }
+            else if (BufferSize == 19 && Buffer[0] == 0xA0 && Buffer[1] == 0x21 && Buffer[18] == 0xA1)
+            {
+                uint8_t uid0 = Buffer[2];
+                uint8_t uid1 = Buffer[3];
+                uint8_t uid2 = Buffer[4];
+                uint8_t uid3 = Buffer[5];
+                int16_t t100 = (int16_t)(((uint16_t)Buffer[6] << 8) | Buffer[7]);
+                uint16_t rh100 = (uint16_t)(((uint16_t)Buffer[8] << 8) | Buffer[9]);
+                uint16_t vcap_mv = (uint16_t)(((uint16_t)Buffer[10] << 8) | Buffer[11]);
+                uint16_t co2_ppm = (uint16_t)(((uint16_t)Buffer[12] << 8) | Buffer[13]);
+                uint16_t tvoc_ppb = (uint16_t)(((uint16_t)Buffer[14] << 8) | Buffer[15]);
+                uint16_t lux = (uint16_t)(((uint16_t)Buffer[16] << 8) | Buffer[17]);
+                printf("[GW] sensor report uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%% Vcap=%.3fV CO2=%uppm TVOC=%uppb LUX=%u\r\n",
+                       uid0, uid1, uid2, uid3, t100 / 100.0f, rh100 / 100.0f,
+                       vcap_mv / 1000.0f, (unsigned)co2_ppm, (unsigned)tvoc_ppb, (unsigned)lux);
+
+                /* Forward sensor data to ESP32 controller via AT command:
+                 * AT+SENSOR=<UID>,<T_x100>,<RH_x100>,<Vcap_mV>,<CO2_ppm>,<TVOC_ppb>,<LUX>,<RSSI>,<SNR>\r\n
+                 * ESP32 side parses integer fields to avoid float formatting overhead.
+                 */
+                {
+                    char at_buf[96];
+                    int at_len;
+                    at_len = snprintf(at_buf, sizeof(at_buf),
+                        "AT+SENSOR=%02X%02X%02X%02X,%d,%u,%u,%u,%u,%u,%d,%d\r\n",
+                        uid0, uid1, uid2, uid3,
+                        (int)t100,          /* temperature * 100, signed */
+                        (unsigned)rh100,    /* humidity * 100 */
+                        (unsigned)vcap_mv,  /* supercap voltage in mV */
+                        (unsigned)co2_ppm,  /* STCC4 CO2 in ppm */
+                        (unsigned)tvoc_ppb, /* SGP30 TVOC in ppb */
+                        (unsigned)lux,      /* BH1620 light in lux */
+                        (int)RssiValue,     /* RSSI dBm */
+                        (int)SnrValue);     /* SNR dB */
+                    if (at_len > 0 && at_len < (int)sizeof(at_buf))
+                    {
+                        serial_output((uint8_t *)at_buf, at_len);
+                    }
+                }
+            }
             else if (BufferSize == 17 && Buffer[0] == 0xA0 && Buffer[1] == 0x21 && Buffer[16] == 0xA1)
             {
                 uint8_t uid0 = Buffer[2];
@@ -665,32 +719,9 @@ int Ra08KitLoraTestStart(void)
                 uint16_t vcap_mv = (uint16_t)(((uint16_t)Buffer[10] << 8) | Buffer[11]);
                 uint16_t co2_ppm = (uint16_t)(((uint16_t)Buffer[12] << 8) | Buffer[13]);
                 uint16_t tvoc_ppb = (uint16_t)(((uint16_t)Buffer[14] << 8) | Buffer[15]);
-                printf("[GW] sensor report uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%% Vcap=%.3fV CO2=%uppm TVOC=%uppb\r\n",
+                printf("[GW] sensor report(v2) uid=%02X%02X%02X%02X T=%.2fC RH=%.2f%% Vcap=%.3fV CO2=%uppm TVOC=%uppb\r\n",
                        uid0, uid1, uid2, uid3, t100 / 100.0f, rh100 / 100.0f,
                        vcap_mv / 1000.0f, (unsigned)co2_ppm, (unsigned)tvoc_ppb);
-
-                /* Forward sensor data to ESP32 controller via AT command:
-                 * AT+SENSOR=<UID>,<T_x100>,<RH_x100>,<Vcap_mV>,<CO2_ppm>,<TVOC_ppb>,<RSSI>,<SNR>\r\n
-                 * ESP32 side parses integer fields to avoid float formatting overhead.
-                 */
-                {
-                    char at_buf[96];
-                    int at_len;
-                    at_len = snprintf(at_buf, sizeof(at_buf),
-                        "AT+SENSOR=%02X%02X%02X%02X,%d,%u,%u,%u,%u,%d,%d\r\n",
-                        uid0, uid1, uid2, uid3,
-                        (int)t100,          /* temperature * 100, signed */
-                        (unsigned)rh100,    /* humidity * 100 */
-                        (unsigned)vcap_mv,  /* supercap voltage in mV */
-                        (unsigned)co2_ppm,  /* STCC4 CO2 in ppm */
-                        (unsigned)tvoc_ppb, /* SGP30 TVOC in ppb */
-                        (int)RssiValue,     /* RSSI dBm */
-                        (int)SnrValue);     /* SNR dB */
-                    if (at_len > 0 && at_len < (int)sizeof(at_buf))
-                    {
-                        serial_output((uint8_t *)at_buf, at_len);
-                    }
-                }
             }
             else if (BufferSize == 13 && Buffer[0] == 0xA0 && Buffer[1] == 0x21 && Buffer[12] == 0xA1)
             {
