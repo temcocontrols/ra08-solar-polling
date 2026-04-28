@@ -10,23 +10,22 @@
 
 #define STCC4_I2C_ADDR             0x62
 #define STCC4_I2C_WAIT_TIMEOUT     200000U
+#define STCC4_POWER_ON_DELAY_MS    20U
+#define STCC4_MEASURE_WAIT_MS      5200U
 
 #define STCC4_CMD_START_PERIODIC   0x21B1
 #define STCC4_CMD_DATA_READY       0xE4B8
 #define STCC4_CMD_READ_MEASUREMENT 0xEC05
 
-/* Default to LOW first: many boards wire EN through inverter/transistor. */
-static bool g_stcc4_co2_en_high = false;
-
 static bool stcc4_write_cmd_u16(uint16_t cmd);
 
-static void stcc4_set_co2_en(bool high)
+static void stcc4_set_co2_en(bool enable)
 {
     gpio_set_iomux(CONFIG_CO2_EN_GPIOX, CONFIG_CO2_EN_PIN, 0);
     gpio_init(CONFIG_CO2_EN_GPIOX, CONFIG_CO2_EN_PIN,
-              high ? GPIO_MODE_OUTPUT_PP_HIGH : GPIO_MODE_OUTPUT_PP_LOW);
+              enable ? GPIO_MODE_OUTPUT_PP_HIGH : GPIO_MODE_OUTPUT_PP_LOW);
     gpio_write(CONFIG_CO2_EN_GPIOX, CONFIG_CO2_EN_PIN,
-               high ? GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW);
+               enable ? GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW);
 }
 
 static void stcc4_i2c_prepare(void)
@@ -45,20 +44,6 @@ static void stcc4_i2c_prepare(void)
     config.settings.master.speed = I2C_SPEED_STANDARD;
     i2c_init(I2C0, &config);
     i2c_cmd(I2C0, true);
-}
-
-static bool stcc4_try_init_with_level(bool co2_en_high)
-{
-    stcc4_set_co2_en(co2_en_high);
-    delay_ms(20);
-    stcc4_i2c_prepare();
-
-    if (!stcc4_write_cmd_u16(STCC4_CMD_START_PERIODIC)) {
-        return false;
-    }
-
-    g_stcc4_co2_en_high = co2_en_high;
-    return true;
 }
 
 static bool stcc4_i2c_wait_flag(i2c_t *i2c, i2c_flag_t flag)
@@ -140,23 +125,10 @@ static bool stcc4_read_bytes(uint8_t *buf, uint8_t len)
 
 bool stcc4_init(void)
 {
-    bool first_high = g_stcc4_co2_en_high;
-    bool second_high = !first_high;
-
-    if (stcc4_try_init_with_level(first_high)) {
-        printf("[STCC4] init OK with CO2_EN=%s\r\n", first_high ? "HIGH" : "LOW");
-        delay_ms(5);
-        return true;
-    }
-
-    if (stcc4_try_init_with_level(second_high)) {
-        printf("[STCC4] init OK with CO2_EN=%s\r\n", second_high ? "HIGH" : "LOW");
-        delay_ms(5);
-        return true;
-    }
-
-    printf("[STCC4] init failed with both CO2_EN polarities\r\n");
-    return false;
+    stcc4_set_co2_en(false);
+    stcc4_i2c_prepare();
+    printf("[STCC4] init done, CO2_EN active-high pulse mode\r\n");
+    return true;
 }
 
 bool stcc4_read_co2(uint16_t *co2_ppm)
@@ -169,50 +141,62 @@ bool stcc4_read_co2(uint16_t *co2_ppm)
         return false;
     }
 
-    /* Keep sensor power in the discovered working state. */
-    stcc4_set_co2_en(g_stcc4_co2_en_high);
+    stcc4_set_co2_en(true);
+    delay_ms(STCC4_POWER_ON_DELAY_MS);
+    stcc4_i2c_prepare();
+
+    if (!stcc4_write_cmd_u16(STCC4_CMD_START_PERIODIC)) {
+        stcc4_set_co2_en(false);
+        return false;
+    }
+
+    delay_ms(STCC4_MEASURE_WAIT_MS);
 
     if (!stcc4_write_cmd_u16(STCC4_CMD_DATA_READY)) {
-        /* If power polarity drifted (shared EN pin), re-probe once. */
-        if (!stcc4_try_init_with_level(!g_stcc4_co2_en_high)) {
-            return false;
-        }
-        if (!stcc4_write_cmd_u16(STCC4_CMD_DATA_READY)) {
-            return false;
-        }
+        stcc4_set_co2_en(false);
+        return false;
     }
 
     if (!stcc4_read_bytes(ready_buf, 3)) {
+        stcc4_set_co2_en(false);
         return false;
     }
 
     if (stcc4_crc8(ready_buf, 2) != ready_buf[2]) {
+        stcc4_set_co2_en(false);
         return false;
     }
 
     ready_word = (uint16_t)(((uint16_t)ready_buf[0] << 8) | ready_buf[1]);
     if ((ready_word & 0x07FFU) == 0U) {
+        stcc4_set_co2_en(false);
         return false;
     }
 
     if (!stcc4_write_cmd_u16(STCC4_CMD_READ_MEASUREMENT)) {
+        stcc4_set_co2_en(false);
         return false;
     }
 
     if (!stcc4_read_bytes(meas, 9)) {
+        stcc4_set_co2_en(false);
         return false;
     }
 
     if (stcc4_crc8(&meas[0], 2) != meas[2]) {
+        stcc4_set_co2_en(false);
         return false;
     }
     if (stcc4_crc8(&meas[3], 2) != meas[5]) {
+        stcc4_set_co2_en(false);
         return false;
     }
     if (stcc4_crc8(&meas[6], 2) != meas[8]) {
+        stcc4_set_co2_en(false);
         return false;
     }
 
     *co2_ppm = (uint16_t)(((uint16_t)meas[0] << 8) | meas[1]);
+    stcc4_set_co2_en(false);
     return true;
 }

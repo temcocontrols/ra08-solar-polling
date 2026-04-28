@@ -8,12 +8,10 @@
 
 #define SHT40_ADDR 0x44
 #define SHT40_I2C_WAIT_TIMEOUT 200000U
+#define SHT40_POWER_ON_DELAY_MS 10U
 
 /* SHT4x single-shot high-repeatability command */
 #define SHT40_CMD_MEASURE_HIGH 0xFD
-
-/* Alternate preferred HUM_EN level across calls. */
-static bool g_sht40_next_hum_en_high = true;
 
 static uint8_t sht40_crc8(const uint8_t *data, uint8_t len)
 {
@@ -98,6 +96,7 @@ bool sht40_init(void)
 
     gpio_set_iomux(CONFIG_HUM_EN_GPIOX, CONFIG_HUM_EN_PIN, 0);
     gpio_init(CONFIG_HUM_EN_GPIOX, CONFIG_HUM_EN_PIN, GPIO_MODE_OUTPUT_PP_HIGH);
+    gpio_write(CONFIG_HUM_EN_GPIOX, CONFIG_HUM_EN_PIN, GPIO_LEVEL_LOW);
     delay_ms(5);
 
     gpio_set_iomux(CONFIG_RA08_I2C_GPIOX, CONFIG_RA08_I2C_SCL_PIN, 3);
@@ -116,24 +115,15 @@ bool sht40_read(float *temperature_c, float *rh_percent)
 {
     if (temperature_c == NULL || rh_percent == NULL) return false;
 
-    {
-        bool first_high = g_sht40_next_hum_en_high;
-        g_sht40_next_hum_en_high = !g_sht40_next_hum_en_high;
+    gpio_write(CONFIG_HUM_EN_GPIOX, CONFIG_HUM_EN_PIN, GPIO_LEVEL_HIGH);
+    delay_ms(SHT40_POWER_ON_DELAY_MS);
 
-        for (int attempt = 0; attempt < 2; ++attempt) {
-            bool hum_en_high = (attempt == 0) ? first_high : !first_high;
-            gpio_write(CONFIG_HUM_EN_GPIOX, CONFIG_HUM_EN_PIN,
-                       hum_en_high ? GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW);
-            printf("[SHT40] HUM_EN=%s for this read (attempt %d)\r\n",
-                   hum_en_high ? "HIGH" : "LOW", attempt + 1);
-            delay_ms(10);
-
-            if (sht40_read_once(temperature_c, rh_percent)) {
-                return true;
-            }
-        }
+    if (!sht40_read_once(temperature_c, rh_percent)) {
+        gpio_write(CONFIG_HUM_EN_GPIOX, CONFIG_HUM_EN_PIN, GPIO_LEVEL_LOW);
+        printf("[SHT40] read failed with HUM_EN=HIGH\r\n");
+        return false;
     }
 
-    printf("[SHT40] read failed with both HUM_EN polarities\r\n");
-    return false;
+    gpio_write(CONFIG_HUM_EN_GPIOX, CONFIG_HUM_EN_PIN, GPIO_LEVEL_LOW);
+    return true;
 }
