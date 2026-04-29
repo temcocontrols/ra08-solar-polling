@@ -36,6 +36,9 @@ static int blink_toggle_elapsed = 0;
 static int blink_toggle_interval = 250; /* ms */
 static int blink_led_state = 0;
 static TimerTime_t node_last_report_at = 0;
+static TimerTime_t node_last_loop_at = 0;
+static uint32_t node_lp_enter_count = 0;
+static uint32_t node_lp_wakeup_count = 0;
 static bool node_report_due_immediately = false;
 #endif
 
@@ -635,6 +638,7 @@ int Ra08KitLoraTestStart(void)
 
         node_report_due_immediately = true;
         node_last_report_at = TimerGetCurrentTime();
+        node_last_loop_at = TimerGetCurrentTime();
         State = LORA_IDLE;
         Radio.Rx(RX_TIMEOUT_VALUE);
         printf("[NODE] radio initialized, direct sensor reporting enabled\r\n");
@@ -982,8 +986,12 @@ int Ra08KitLoraTestStart(void)
          * paced by a short delay to avoid busy-looping. Interval ~10s. */
 #ifndef CONFIG_GATEWAY
         const TimerTime_t sht_interval_ms = 10000;
+        TimerTime_t loop_elapsed_ms = TimerGetElapsedTime(node_last_loop_at);
+        if (loop_elapsed_ms == 0) {
+            loop_elapsed_ms = 1;
+        }
+        node_last_loop_at = TimerGetCurrentTime();
 
-        delay_ms(50);
         if (node_report_due_immediately) {
             node_report_due_immediately = false;
             node_send_sensor_report("startup");
@@ -991,10 +999,11 @@ int Ra08KitLoraTestStart(void)
             node_send_sensor_report("periodic");
         }
 
-        /* Blink state update (50ms tick) - only toggle GPIO_PIN_4 now */
+        /* Blink state update based on elapsed loop time. */
         if (blink_ms_remaining > 0) {
-            blink_ms_remaining -= 50;
-            blink_toggle_elapsed += 50;
+            int delta_ms = (loop_elapsed_ms > 1000U) ? 1000 : (int)loop_elapsed_ms;
+            blink_ms_remaining -= delta_ms;
+            blink_toggle_elapsed += delta_ms;
             if (blink_toggle_elapsed >= blink_toggle_interval) {
                 blink_toggle_elapsed = 0;
                 blink_led_state = !blink_led_state;
@@ -1017,6 +1026,29 @@ int Ra08KitLoraTestStart(void)
                 ackf[5] = 0xA1;
                 Radio.Send(ackf, sizeof(ackf));
                 printf("Blink finished, sent finish ACK\r\n");
+            }
+        }
+
+        /* Enter STOP3 when idle. Wakeup is driven by RTC/IRQs. */
+        {
+            TimerTime_t lp_before_ms;
+            TimerTime_t lp_after_ms;
+            TimerTime_t slept_ms;
+
+            lp_before_ms = TimerGetCurrentTime();
+            node_lp_enter_count++;
+            TimerLowPowerHandler();
+            lp_after_ms = TimerGetCurrentTime();
+            slept_ms = TimerGetElapsedTime(lp_before_ms);
+
+            if (slept_ms >= 5U) {
+                node_lp_wakeup_count++;
+                if ((node_lp_wakeup_count % 20U) == 0U) {
+                    printf("[LP] enter=%lu wake=%lu last_sleep=%lums\r\n",
+                           (unsigned long)node_lp_enter_count,
+                           (unsigned long)node_lp_wakeup_count,
+                           (unsigned long)slept_ms);
+                }
             }
         }
 #endif
